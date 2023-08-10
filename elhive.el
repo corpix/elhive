@@ -25,15 +25,16 @@
 (defun elhive--set-process-filters (process)
   (prog1 process
     (when elhive-ansi-colors-filter
-      (set-process-filter process
-			  (lambda (process string)
-			    (internal-default-process-filter process string)
-			    (with-current-buffer (process-buffer process)
-			      (goto-char (point-max))
-			      (let ((previous-point-max (point-max)))
-				(insert string)
-				(ansi-color-apply-on-region previous-point-max (point-max))
-				(goto-char (point-max)))))))))
+      (set-process-filter
+       process
+       (lambda (process string)
+	 ;;(internal-default-process-filter process string)
+	 (with-current-buffer (process-buffer process)
+	   (goto-char (point-max))
+	   (let ((previous-point-max (point-max)))
+	     (insert string)
+	     (ansi-color-apply-on-region previous-point-max (point-max))
+	     (goto-char (point-max)))))))))
 
 ;;
 
@@ -43,7 +44,6 @@
 (defvar elhive--services (make-hash-table :test 'equal))
 (defvar elhive--services-by-group (make-hash-table :test 'equal))
 (defvar elhive--service-instances (make-hash-table :test 'equal))
-(defvar elhive--process-service-instances (make-hash-table))
 (defvar elhive--buffer-process nil)
 
 ;;
@@ -178,13 +178,12 @@
        process
        (lambda (process event)
 	 (when (memq (process-status process) '(exit signal))
-	   (let ((instance (elhive-service-instance process)))
-	     (with-elhive-service-instance-buffer instance
-	       (goto-char (point-max))
-	       (insert (format "\n\nProcess %S exited at %s with event: %S\n"
-			       process (format-time-string "%Y-%m-%d %H:%M:%S" (current-time))
-			       (string-clean-whitespace event))))
-	     (elhive--service-instance-hook-run instance 'after))))))))
+	   (with-elhive-service-instance-buffer instance
+	     (goto-char (point-max))
+	     (insert (format "\n\nProcess %S exited at %s with event: %S\n"
+			     process (format-time-string "%Y-%m-%d %H:%M:%S" (current-time))
+			     (string-clean-whitespace event))))
+	   (elhive--service-instance-hook-run instance 'after)))))))
 
 (defun elhive--service-instance-state (instance)
   (with-elhive-service-instance-buffer instance
@@ -196,19 +195,14 @@
 	    (cond ((memq status '(exit)) (if (= code 0) 'exit 'fail))
 		  ((memq status '(signal)) 'fail)
 		  (t 'active)))
-	'exit))))
+	'inactive))))
 
 ;;
 
-(defun elhive-service-instance (process)
-  (gethash process elhive--process-service-instances))
-
 (defun elhive-service-start (service)
-  (let* ((instance (elhive--service-instantiate service))
-	 (process (elhive--service-instance-start-process instance)))
+  (let ((instance (elhive--service-instantiate service)))
     (prog1 instance
-      (unless (memq (elhive--service-instance-state instance) '(active))
-	(puthash process instance elhive--process-service-instances)))))
+      (elhive--service-instance-start-process instance))))
 
 (defun elhive-service-stop (service)
   (let* ((instance (elhive--service-instance-get service)))
