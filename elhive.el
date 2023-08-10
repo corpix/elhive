@@ -212,7 +212,8 @@
 	  (with-elhive-service-instance-buffer instance
 	    (let ((process (get-buffer-process (current-buffer))))
 	      (when process
-		(kill-process process)))))
+		(kill-process process)))
+	    (kill-local-variable 'elhive--buffer-process)))
       (error "Service %S is not instantiated" (elhive--service-name service)))))
 
 (defun elhive-service-restart (service)
