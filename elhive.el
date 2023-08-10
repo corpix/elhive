@@ -1,4 +1,4 @@
-;;; elhive.el --- operate on services with emacs -*- lexical-binding:t -*-
+;;; elhive.el --- operate on services with emacs -*- lexical-binding: t -*-
 
 ;; Copyright (C) 2023 Dmitry Moscowski, corpix.dev
 
@@ -8,6 +8,7 @@
 ;;; Code:
 (require 'ansi-color)
 (require 'subr-x)
+(require 'comint)
 
 (defgroup elhive nil
   "Elhive service manager."
@@ -55,7 +56,7 @@
 	  (service-id-sym (gensym))
 	  (group-id-sym (gensym))
 	  (group-bucket-sym (gensym)))
-      `(let* ((,service-sym (elhive--service-defaults ',name ',body))
+      `(let* ((,service-sym (elhive--service-defaults ',name (list ,@body)))
 	      (,service-id-sym (elhive--service-id ,service-sym)))
 	 (prog1 ,service-sym
 	   (puthash ,service-id-sym ,service-sym elhive--services)
@@ -76,9 +77,8 @@
   (declare (indent defun))
   (let ((buffer-sym (gensym)))
     `(let ((,buffer-sym (elhive--service-instance-buffer ,instance)))
-       (when (get-buffer ,buffer-sym)
-	 (with-current-buffer ,buffer-sym
-	   ,@body)))))
+       (with-current-buffer (get-buffer-create ,buffer-sym)
+	 ,@body))))
 
 ;;
 
@@ -111,17 +111,11 @@
   (plist-put service :directory
 	     (or (plist-get service :directory)
 		 default-directory))
+  (plist-put service :environment
+	     (plist-get service :environment))
+  (plist-put service :hooks
+	     (plist-get service :hooks))
   service)
-
-(defun elhive--service-process-sentinel (process event)
-  (when (memq (process-status process) '(exit signal))
-    (let ((instance (elhive-service-instance process)))
-      (with-elhive-service-instance-buffer instance
-	(goto-char (point-max))
-	(insert (format "\n\nProcess %S exited at %s with event: %S\n"
-			process (format-time-string "%Y-%m-%d %H:%M:%S" (current-time))
-			(string-clean-whitespace event))))
-      (elhive--service-instance-state-set instance 'failed))))
 
 ;;
 
@@ -156,15 +150,40 @@
       (error "Service %S is not instantiated" instance-id))
     instance))
 
+(defun elhive--service-instance-hook-run (instance hook)
+  (let ((hook-procs (plist-get (plist-get instance :hooks) hook)))
+    (when hook-procs
+      (cond ((and (listp hook-procs) (not (eq (car hook-procs) 'closure)))
+	     (dolist (hook-proc hook-procs) (funcall hook-proc instance)))
+	    (t (funcall hook-procs instance))))))
+
 (defun elhive--service-instance-start-process (instance)
-  (let* ((default-directory (plist-get instance :directory))
-	 (process (apply #'start-process
-			 (plist-get instance :command)
-			 (plist-get instance :buffer)
-			 (plist-get instance :command)
-			 (plist-get instance :arguments))))
+  (let* ((process-environment (copy-sequence process-environment))
+	 (process (with-elhive-service-instance-buffer instance
+		    (setq default-directory (plist-get instance :directory))
+		    (setq comint-scroll-to-bottom-on-output t)
+		    (setq truncate-lines t)
+		    (dolist (var (plist-get instance :environment))
+		      (setenv (format "%s" (car var)) (cadr var)))
+		    (elhive--service-instance-hook-run instance 'before)
+		    (let ((command (plist-get instance :command))
+			  (buffer (plist-get instance :buffer))
+			  (arguments (plist-get instance :arguments)))
+		      (message "Starting process %S with arguments %S inside %S" command arguments buffer)
+		      (apply #'start-process command buffer command arguments)))))
     (prog1 process
-      (set-process-sentinel process #'elhive--service-process-sentinel))))
+      (set-process-sentinel
+       process
+       (lambda (process event)
+	 (when (memq (process-status process) '(exit signal))
+	   (let ((instance (elhive-service-instance process)))
+	     (with-elhive-service-instance-buffer instance
+	       (goto-char (point-max))
+	       (insert (format "\n\nProcess %S exited at %s with event: %S\n"
+			       process (format-time-string "%Y-%m-%d %H:%M:%S" (current-time))
+			       (string-clean-whitespace event))))
+	     (elhive--service-instance-state-set instance 'failed)
+	     (elhive--service-instance-hook-run instance 'after))))))))
 
 (defun elhive--service-instance-state-get (instance)
   (plist-get instance :state))
@@ -205,6 +224,11 @@
   (ignore-errors (elhive-service-stop service))
   (elhive-service-start service))
 
+(defun elhive-service-state (service)
+  (let* ((instance (elhive--service-instance-get service)))
+    (cons (elhive--service-instance-name instance)
+	  (elhive--service-instance-state-get instance))))
+
 ;;
 
 (defun elhive-group-start (name)
@@ -220,6 +244,11 @@
 (defun elhive-group-restart (name)
   (let ((group (gethash name elhive--services-by-group)))
     (mapcar #'elhive-service-restart
+	    (hash-table-values group))))
+
+(defun elhive-group-state (name)
+  (let ((group (gethash name elhive--services-by-group)))
+    (mapcar #'elhive-service-state
 	    (hash-table-values group))))
 
 ;;
@@ -239,6 +268,29 @@
 
 ;; (elhive-group-start 'non-default)
 
+(defun elhive-hook-port-wait (host port &optional retry-count sleep-interval)
+  (lambda (instance)
+    (message "Running elhive port-wait hook: host %s, port %s. retry-count %s, sleep-interval %s, instance %s"
+	     host port retry-count sleep-interval
+	     (elhive--service-instance-id instance))
+    (let ((success nil)
+          (retries 0))
+      (while (and (not success)
+		  (< retries (or retry-count 50)))
+	(condition-case err
+            (progn (delete-process (open-network-stream
+				    (elhive--service-instance-buffer instance)
+				    nil host port
+				    :type 'plain
+				    :coding 'no-conversion))
+		   (setq success t))
+          (file-error
+           (let ((inhibit-message nil))
+             (message "Failed to connect to %s:%s with error message %s"
+		      host port (error-message-string err))
+             (sit-for (or sleep-interval 0.5))
+             (setq retries (1+ retries))))))
+      success)))
 
 (provide 'elhive)
 
