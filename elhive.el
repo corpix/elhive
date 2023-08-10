@@ -253,6 +253,12 @@
 
 ;;
 
+(defun elhive-state ()
+  (mapcar (lambda (group) (list group (elhive-group-state group)))
+	  (hash-table-keys elhive--services-by-group)))
+
+;;
+
 ;; (defelhive-service test
 ;;   :command "bash"
 ;;   :arguments (-x -e -c "nc -l 2289"))
