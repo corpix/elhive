@@ -70,6 +70,7 @@
 (defmacro defelhive-group (name &rest body)
   (declare (indent defun))
   `(let ((elhive-group ',name))
+     (puthash elhive-group (make-hash-table :test 'equal) elhive--services-by-group)
      ,@(mapcar (lambda (service)
 		 `(defelhive-service ,@service))
 	       body)))
